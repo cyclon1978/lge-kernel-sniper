@@ -12,6 +12,9 @@
  *
  */
 
+// DARK-MOD:
+#include <linux/miscdevice.h>
+
 #include <linux/module.h>
 #include <linux/i2c.h>
 #include <linux/gpio.h>
@@ -19,6 +22,7 @@
 #include <linux/leds.h>
 #include <linux/hrtimer.h>
 #include <linux/slab.h>
+
 
 #ifdef CONFIG_HAS_EARLYSUSPEND
 #include <linux/earlysuspend.h>
@@ -58,11 +62,25 @@
 #define BD2812_DCDCDRIVER		0x40
 #define BD2812_PIN_FUNC_SETUP		0x41
 
-#define BD2802_CURRENT_WHITE_PEAK	0x5A /* 18mA */
-#define BD2802_CURRENT_WHITE_MAX	0x32 /* 10mA */
-#define BD2802_CURRENT_BLUE_MAX		0x32 /* 10mA */
-#define BD2802_CURRENT_WHITE_MIN	0x05 /* 1mA */
-#define BD2802_CURRENT_BLUE_MIN		0x05 /* 1mA */
+// DARK-MOD: replace values
+// old values
+// 0x5A == 90 == 18ma
+// 0x32 == 50 == 10ma
+// 0x05 ==  5 ==  1ma
+// 0x01 ==  1 ==  0.2ma 
+//#define BD2802_CURRENT_WHITE_PEAK	0x5A /* 18mA BUT THIS VALUE IS UNUSED */
+//#define BD2802_CURRENT_WHITE_MAX	0x32 /* 10mA */
+//#define BD2802_CURRENT_BLUE_MAX		0x32 /* 10mA */
+//#define BD2802_CURRENT_WHITE_MIN	0x05 /* 1mA */
+//#define BD2802_CURRENT_BLUE_MIN		0x05 /* 1mA */
+
+// new values
+#define BD2802_CURRENT_WHITE_MAX	0x01 /* 0.2mA */
+#define BD2802_CURRENT_BLUE_MAX		0x01 /* 0.2mA */
+#define BD2802_CURRENT_WHITE_MIN	0x01 /* 0.2mA */
+#define BD2802_CURRENT_BLUE_MIN		0x01 /* 0.2mA */
+// END DARK-MOD
+
 #define BD2802_CURRENT_000		0x00 /* 0.0mA */
 
 #define BD2802_PATTERN_FULL		0x0F
@@ -172,6 +190,11 @@ static inline u8 bd2802_get_reg_addr(enum led_ids id, enum led_colors color,
 	return reg_offset + bd2802_get_base_offset(id, color);
 }
 
+/*--------------------------------------------------------------*/
+// DARK-MOD: read sysfs data
+static bool led_disabled = false;
+// END DARK-MOD
+/*--------------------------------------------------------------*/
 
 /*--------------------------------------------------------------*/
 /*	BD2802GU core functions					*/
@@ -238,6 +261,7 @@ static void bd2802_enable(struct bd2802_led *led)
 
 static void bd2802_turn_white(struct bd2802_led *led, enum key_leds id)
 {
+  if (led_disabled == false) { // DARK-MOD
 	u8 reg;
 
 	if (led->blink_enable)
@@ -329,10 +353,12 @@ static void bd2802_turn_white(struct bd2802_led *led, enum key_leds id)
 				break;
 		}
 	}
+  } // DARK-MOD
 }
 
 static void bd2802_turn_blue(struct bd2802_led *led, enum key_leds id)
 {
+  if (led_disabled == false) { // DARK-MOD
 	u8 reg;
 
 	switch (id) {
@@ -376,10 +402,12 @@ static void bd2802_turn_blue(struct bd2802_led *led, enum key_leds id)
 			break;
 	}
 
+  } // DARK-MOD
 }
 
 static void bd2802_on(struct bd2802_led *led)
 {
+  if (led_disabled == false) { // DARK-MOD
 	bd2802_turn_white(led, MENU);
 	bd2802_turn_white(led, HOME);
 	bd2802_turn_white(led, BACK);
@@ -387,6 +415,7 @@ static void bd2802_on(struct bd2802_led *led)
 	bd2802_turn_white(led, HIDDEN1);
 	bd2802_turn_white(led, HIDDEN2);
 	//HARDLINE	bd2802_enable(led);
+  } // DARK-MOD
 }
 
 void touchkey_pressed(enum key_leds id)
@@ -1279,10 +1308,74 @@ static struct i2c_driver bd2802_i2c_driver = {
 	.id_table	= bd2802_id,
 };
 
+// DARK-MOD: read sysfs data
+
+static ssize_t led_disabled_status_read(struct device * dev, struct device_attribute * attr, char * buf)
+{
+    return sprintf(buf, "%u\n", (led_disabled ? 1 : 0));
+}
+
+static ssize_t led_disabled_status_write(struct device * dev, struct device_attribute * attr, const char * buf, size_t size)
+{
+    unsigned int data;
+
+    if(sscanf(buf, "%u\n", &data) == 1) 
+        {
+            if (data == 1) 
+                {
+                    pr_info("%s: led_disabled enabled\n", __FUNCTION__);
+
+                    led_disabled = true;
+
+                } 
+            else if (data == 0) 
+                {
+                    pr_info("%s: led_disabled disabled\n", __FUNCTION__);
+
+                    led_disabled = false;
+                } 
+            else 
+                {
+                    pr_info("%s: invalid input range %u\n", __FUNCTION__, data);
+                }
+        } 
+    else 
+        {
+            pr_info("%s: invalid input\n", __FUNCTION__);
+        }
+
+    return size;
+}
+
+static DEVICE_ATTR(led_disabled, S_IRUGO | S_IWUGO, led_disabled_status_read, led_disabled_status_write);
+static struct attribute *led_disabled_attributes[] = {
+&dev_attr_led_disabled,
+NULL
+};
+static struct attribute_group led_disabled_group = {
+.attrs = led_disabled_attributes,
+};
+
+static struct miscdevice led_disabled_device = {
+.minor = MISC_DYNAMIC_MINOR,
+.name = "custom",
+};
+// END DARK-MOD
+
 #if 1
 void __init bd2802_init(void)
 {	
 	i2c_add_driver(&bd2802_i2c_driver);
+
+// DARK-MOD:
+	if (misc_register(&led_disabled_device))
+		printk("%s misc_register(%s) failed\n", __FUNCTION__, led_disabled_device.name);
+	else {
+		if (sysfs_create_group(&led_disabled_device.this_device->kobj, &led_disabled_group))
+		dev_err("failed to create sysfs group for device %s\n", led_disabled_device.name);
+	}
+// END DARK-MOD
+
 }
 #else
 static int __init bd2802_init(void)
